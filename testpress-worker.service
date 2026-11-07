@@ -1,0 +1,17 @@
+[Unit]
+Description=Testpress Background Worker
+After=network.target
+
+[Service]
+Type=simple
+User=testpress-worker
+Group=testpress-worker
+WorkingDirectory=/opt/testpress-worker
+ExecStart=/usr/bin/python3 /opt/testpress-worker/app.py
+Restart=on-failure
+RestartSec=5
+Environment=HEARTBEAT_INTERVAL=5
+Environment=CRASH_AFTER=0
+
+[Install]
+WantedBy=multi-user.target
