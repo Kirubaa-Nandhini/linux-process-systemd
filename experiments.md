@@ -1,40 +1,34 @@
 # Experiments — Linux Process Management and systemd
 
-This document records the practical work completed and distinguishes tested items from items that remain to be demonstrated. Commands were run from Windows PowerShell against the Multipass VM `testpress`, unless noted otherwise.
+I used my existing Multipass VM (`testpress`) to practise Linux process management and run a Python worker as a systemd service. These are the commands I tried, what happened, and a few things I learned along the way.
 
-## 1. Foreground worker and graceful Ctrl+C
-
-**Command:**
+## 1. Running the worker in the foreground
 
 ```powershell
 multipass exec testpress -- sudo -u ubuntu python3 /home/ubuntu/linux-process-systemd/app.py
 ```
 
-**Observed:** Heartbeats appeared every five seconds. Ctrl+C delivered `SIGINT`; the worker printed its graceful-shutdown message and exited.
+The worker started printing a heartbeat every five seconds. When I pressed `Ctrl+C`, it received `SIGINT`, printed a shutdown message, and stopped gracefully.
 
-**Status:** Tested.
+## 2. Running the worker in the background
 
-## 2. Background worker with nohup
-
-**Command:**
+I used `nohup` to keep the worker running in the background and redirected its output to a log file.
 
 ```powershell
 multipass exec testpress -- sudo -u ubuntu bash -c "cd /home/ubuntu/linux-process-systemd && nohup python3 app.py > worker.log 2>&1 < /dev/null &"
 ```
 
-**Verification:**
+I checked the log using:
 
 ```powershell
 multipass exec testpress -- sudo -u ubuntu tail -n 5 /home/ubuntu/linux-process-systemd/worker.log
 ```
 
-**Observed:** Heartbeat messages appeared in `worker.log`, confirming output redirection.
+The heartbeat messages appeared in the log even after the command returned to the terminal. This helped me understand how `nohup` and output redirection work.
 
-**Status:** Tested. Temporary background processes were stopped before using the systemd-managed worker.
+## 3. Checking running processes
 
-## 3. Process inspection
-
-**Commands practised:**
+I tried a few commands to find and inspect running processes.
 
 ```bash
 ps aux
@@ -42,150 +36,108 @@ pgrep -af "python3 app.py"
 ps -o pid,ppid,cmd -p <PID>
 ```
 
-**Observed:** `ps` displayed process details, `pgrep` found matching processes, and `ps -o` selected PID, parent PID, and command columns.
+I learned how to find a process, check its PID and parent PID, and view the command used to start it.
 
-**Status:** Practised.
+## 4. Stopping the worker through systemd
 
-## 4. Graceful shutdown through systemd
-
-**Commands:**
+I used systemd to stop the worker instead of killing the process directly.
 
 ```powershell
 multipass exec testpress -- sudo systemctl stop testpress-worker
 multipass exec testpress -- sudo journalctl -u testpress-worker -n 8 --no-pager
 ```
 
-**Observed:** The journal showed signal 15 (`SIGTERM`), the worker's graceful-shutdown message, and a successful service stop. The service was started again with `systemctl start`.
+The logs showed that the worker received `SIGTERM` (signal 15) and shut down gracefully. I started the service again using `systemctl start`.
 
-**Status:** Tested.
+## 5. Checking automatic restart after a crash
 
-## 5. Restart after application crash
+I temporarily changed `CRASH_AFTER` to `3` in the environment file to make the worker exit after a few heartbeats.
 
-For this test, `CRASH_AFTER` was temporarily set to `3`. The service was reloaded and restarted.
-
-**Verification:**
+After restarting the service, I checked its logs:
 
 ```powershell
-multipass exec testpress -- sudo systemctl status testpress-worker --no-pager
 multipass exec testpress -- sudo journalctl -u testpress-worker -n 25 --no-pager
 ```
 
-**Observed:** The journal showed the simulated crash, exit status 1, a scheduled restart, and a new worker process. `CRASH_AFTER` was restored to `0` afterwards.
+The worker crashed with exit status 1, and systemd started it again after the configured delay. I changed `CRASH_AFTER` back to `0` after the test.
 
-**Status:** Tested.
+This helped me understand how `Restart=on-failure` works.
 
-## 6. Recovery after SIGKILL
+## 6. Checking recovery after SIGKILL
 
-**Commands:**
+I also tried forcefully terminating the worker process.
 
 ```powershell
 multipass exec testpress -- sudo systemctl show testpress-worker -p MainPID
 multipass exec testpress -- sudo kill -KILL <PID>
-Start-Sleep -Seconds 7
+```
+
+After waiting a few seconds, I checked the service again:
+
+```powershell
 multipass exec testpress -- sudo systemctl status testpress-worker --no-pager
 ```
 
-Replace `<PID>` with the `MainPID` returned by the first command.
+The original process was terminated, but systemd started a new one. I verified that the service was running with a different PID.
 
-**Observed:** The original process was forcefully terminated. systemd started a new worker. The new process was observed running with PID `7349`.
+## 7. Using an environment file
 
-**Status:** Tested.
-
-## 7. Environment file
-
-Environment file: `/opt/testpress-worker/worker.env`
+I created an environment file at `/opt/testpress-worker/worker.env` to keep the worker's configuration separate from the application code.
 
 ```ini
 HEARTBEAT_INTERVAL=5
 CRASH_AFTER=0
 ```
 
-The service unit uses:
+I added the following setting to the systemd service:
 
 ```ini
 EnvironmentFile=/opt/testpress-worker/worker.env
 ```
 
-After editing the unit, systemd was reloaded and the service restarted.
+I reloaded systemd, restarted the service, and checked that it recognised the environment file.
 
-**Verification:**
+## 8. Setting CPU and memory limits
 
-```powershell
-multipass exec testpress -- sudo systemctl show testpress-worker -p EnvironmentFiles
-```
-
-**Observed:** systemd reported `/opt/testpress-worker/worker.env` as the service's environment file.
-
-**Status:** Configured and verified.
-
-## 8. CPU and memory limits
-
-The service unit includes:
+I added these limits to the service configuration:
 
 ```ini
 CPUQuota=50%
 MemoryMax=100M
 ```
 
-After reloading systemd and restarting the service, the limits were checked with:
+After reloading systemd and restarting the service, I checked the configured limits:
 
 ```powershell
 multipass exec testpress -- sudo systemctl show testpress-worker -p CPUQuotaPerSecUSec -p MemoryMax
 ```
 
-The service status showed CPU quota configured at 50%, memory maximum of 100 MB, actual memory use of approximately 4.1 MB, and peak memory of approximately 4.3 MB.
+The CPU quota was set to 50%, and the memory limit was set to 100 MB. The worker was using approximately 4.1 MB of memory at the time of checking.
 
-**Status:** Limits configured and verified. The worker did not exceed the memory limit, so a memory-limit-exceeded event was not demonstrated.
+I verified the configuration but did not try to make the worker exceed the memory limit.
 
-## 9. Automatic startup after reboot
+## 9. Starting the service automatically after reboot
 
-The service was enabled:
+I enabled the service so that it would start automatically when the VM boots.
 
 ```powershell
 multipass exec testpress -- sudo systemctl enable testpress-worker
-```
-
-The VM was rebooted:
-
-```powershell
 multipass exec testpress -- sudo reboot
 ```
 
-After the VM returned, its service status was checked:
+After the VM restarted, I checked the service:
 
 ```powershell
 multipass exec testpress -- sudo systemctl status testpress-worker --no-pager
 ```
 
-**Observed:** The VM and worker service were running after reboot.
+The worker was running again without me having to start it manually.
 
-**Status:** Tested.
+## Screenshots
 
-## 10. Remaining topics from the broader exercise
+The following screenshots are included as evidence of the main experiments:
 
-Do not mark these as completed unless they are actually run and captured:
-
-- `top` / `htop`: interactive process and resource monitoring.
-- `pidof`: find a process ID by executable name.
-- `pstree`: view parent-child process relationships.
-- `jobs`, `bg`, `fg`: manage jobs started from the current shell.
-- `nice`, `renice`: set or change process scheduling niceness.
-- Memory-limit exhaustion: not tested; only the configured limit and normal usage were checked.
-- Invalid executable and repeated-crash behaviour: not separately documented as completed.
-
-## Screenshot evidence checklist
-
-Save real screenshots in this folder. Suggested filenames:
-
-1. `01-foreground-worker.png` — heartbeat and graceful Ctrl+C shutdown.
-2. `02-nohup-background.png` — background worker log output.
-3. `03-process-inspection.png` — `ps` and `pgrep` output.
-4. `04-systemd-status.png` — active service, non-root user, and MainPID.
-5. `05-graceful-sigterm.png` — journal showing SIGTERM and graceful shutdown.
-6. `06-crash-restart.png` — journal showing simulated crash and restart.
-7. `07-sigkill-recovery.png` — service running again after SIGKILL.
-8. `08-environment-file.png` — environment file path reported by systemd.
-9. `09-resource-limits.png` — CPUQuota and MemoryMax configuration/status.
-10. `10-reboot-autostart.png` — service active after VM reboot.
-
-Only include screenshots you actually capture. Do not present an uncaptured screenshot as evidence.
+1. `01-foreground-worker.png` — Worker heartbeats and graceful shutdown using Ctrl+C.
+2. `02-nohup-background.png` — Worker running in the background and writing to a log file.
+3. `04-systemd-status.png` — systemd service status, including its running state and process details.
+4. `06-crash-restart.png` — Worker crash and automatic restart by systemd.
